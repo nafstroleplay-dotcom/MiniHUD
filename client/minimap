@@ -1,0 +1,78 @@
+-- Memasang minimap kustom: mask .ytd sesuai Config.Minimap.shape + posisi komponen minimap.
+-- (minimap.gfx & minimap.ytd di folder stream/ otomatis menggantikan bawaan game)
+-- Ukuran & posisi bisa diatur pemain di /hudsettings (slider Minimap + Edit HUD layout),
+-- dikirim lewat Minimap.set(scale, offsetX, offsetY).
+Minimap = { set = function() end, info = nil }
+
+local root = Config.Minimap
+if not root or not root.enabled then return end
+local cfg = root.shapes and root.shapes[root.shape]
+if not cfg then
+    print(('[minihud] Config.Minimap.shape "%s" tidak dikenal'):format(tostring(root.shape)))
+    return
+end
+
+local baseSize = math.min(3.0, math.max(0.5, tonumber(root.size) or 1.0)) -- Config.Minimap.size
+local userScale, offX, offY = 1.0, 0.0, 0.0
+local applied
+
+-- info untuk NUI (kotak penanda minimap di mode edit)
+Minimap.info = {
+    x = cfg.minimap[1], y = cfg.minimap[2], w = cfg.minimap[3], h = cfg.minimap[4],
+    size = baseSize,
+}
+
+local function clamp(v, lo, hi) return math.min(hi, math.max(lo, v)) end
+
+Minimap.set = function(scale, ox, oy)
+    userScale = clamp(tonumber(scale) or userScale, 0.5, 3.0)
+    offX = clamp(tonumber(ox) or offX, -1.0, 1.0)
+    offY = clamp(tonumber(oy) or offY, -1.0, 1.0)
+end
+
+-- Skala dari pojok kiri-bawah minimap, lalu digeser (offX, offY): posisi & ukuran tiap
+-- komponen dikalikan skala relatif ke titik tempat minimap menempel.
+local function place(name, p)
+    local s = baseSize * userScale
+    local o = cfg.minimap
+    local x = o[1] + (p[1] - o[1]) * s + offX
+    local y = o[2] + (p[2] - o[2]) * s + offY
+    SetMinimapComponentPosition(name, 'L', 'B', x, y, p[3] * s, p[4] * s)
+end
+
+local function apply()
+    SetMinimapClipType(cfg.clipType or 0)
+    place('minimap', cfg.minimap)
+    place('minimap_mask', cfg.mask)
+    place('minimap_blur', cfg.blur)
+
+    -- paksa minimap menghitung ulang ukurannya
+    SetBigmapActive(true, false)
+    Wait(0)
+    SetBigmapActive(false, false)
+end
+
+CreateThread(function()
+    RequestStreamedTextureDict(cfg.dict, false)
+
+    local timeout = GetGameTimer() + 10000
+    while not HasStreamedTextureDictLoaded(cfg.dict) and GetGameTimer() < timeout do
+        Wait(50)
+    end
+
+    if HasStreamedTextureDictLoaded(cfg.dict) then
+        AddReplaceTexture('platform:/textures/graphics', 'radarmasksm', cfg.dict, 'radarmasksm')
+    else
+        print(('[minihud] %s.ytd gagal dimuat, cek folder stream/'):format(cfg.dict))
+    end
+
+    -- terapkan ulang hanya kalau ukuran/posisi berubah (slider mengirim banyak event, jadi dicek berkala)
+    while true do
+        local key = ('%.4f|%.4f|%.4f'):format(userScale, offX, offY)
+        if applied ~= key then
+            applied = key
+            apply()
+        end
+        Wait(150)
+    end
+end)
