@@ -1,0 +1,251 @@
+local userHidden = false
+local alwaysMap = true
+local shown = false
+local lastPayload = ''
+local serverInfo = { count = 0, max = 48, ping = 0 }
+
+local DIRS = { 'N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW' }
+
+-- ---------- seatbelt ----------
+local beltOn = false -- status sabuk (dari event script lain, atau dari tombol B kalau builtin)
+
+local function isBelted()
+    local sb = Config.Seatbelt or {}
+    if sb.builtin then return beltOn end
+    local state = LocalPlayer.state[sb.statebag or 'seatbelt']
+    if state ~= nil then return state == true end
+    return beltOn
+end
+
+-- script seatbelt lain (mis. qb-smallresources / qb-hud) umumnya memicu event ini
+RegisterNetEvent('seatbelt:client:ToggleSeatbelt', function(state)
+    if type(state) == 'boolean' then beltOn = state else beltOn = not beltOn end
+end)
+
+local function setShown(state)
+    if shown == state then return end
+    shown = state
+    SendNUIMessage({ action = 'visible', value = state })
+end
+
+local function getVehicleData(veh)
+    local mult = Config.SpeedUnit == 'mph' and 2.236936 or 3.6
+    local speed = GetEntitySpeed(veh)
+    local gear = GetVehicleCurrentGear(veh)
+    local gearLabel = tostring(gear)
+    if gear == 0 then gearLabel = speed < 0.5 and 'N' or 'R' end
+
+    local fuel = Entity(veh).state.fuel or GetVehicleFuelLevel(veh)
+
+    return {
+        speed = math.floor(speed * mult + 0.5),
+        unit = Config.SpeedUnit == 'mph' and 'MPH' or 'KM/H',
+        gear = gearLabel,
+        rpm = GetVehicleCurrentRpm(veh),
+        fuel = math.floor(fuel + 0.5),
+        belt = isBelted(),
+    }
+end
+
+-- Stamina lari. Native GetPlayerSprintStaminaRemaining naik saat lari (0 = segar, 100 = habis).
+-- Config.Stamina.mode: 'used' = bar bertambah saat lari | 'remaining' = bar berkurang saat lari
+local function getStamina(id)
+    local used = math.min(100.0, math.max(0.0, GetPlayerSprintStaminaRemaining(id) + 0.0))
+    local remaining = 100.0 - used
+    local mode = Config.Stamina and Config.Stamina.mode or 'used'
+    local value = mode == 'remaining' and remaining or used
+    return math.floor(value + 0.5), remaining <= 15.0
+end
+
+local function getVoice()
+    local state = LocalPlayer.state
+    local prox = state.proximity
+    return (type(prox) == 'table' and prox.index) or 2, state.radioChannel or 0
+end
+
+CreateThread(function()
+    while true do
+        local wait = Config.Interval
+
+        if Bridge.isLoggedIn() and not userHidden and not IsPauseMenuActive() then
+            setShown(true)
+
+            local ped = PlayerPedId()
+            local id = PlayerId()
+            local p = Bridge.get()
+
+            local veh = GetVehiclePedIsIn(ped, false)
+            DisplayRadar(alwaysMap or veh ~= 0)
+            if veh ~= 0 then wait = Config.VehicleInterval else beltOn = false end
+
+            local maxHp = math.max(GetEntityMaxHealth(ped) - 100, 1)
+            local hp = math.max(GetEntityHealth(ped) - 100, 0)
+
+            local coords = GetEntityCoords(ped)
+            local streetHash = GetStreetNameAtCoord(coords.x, coords.y, coords.z)
+            local bearing = (360.0 - GetEntityHeading(ped)) % 360.0
+
+            local prox, radio = getVoice()
+            local stamina, staminaLow = getStamina(id)
+
+            local data = {
+                health = math.floor(hp / maxHp * 100),
+                armor = GetPedArmour(ped),
+                hunger = math.floor(p.hunger or 100),
+                thirst = math.floor(p.thirst or 100),
+                stress = math.floor(p.stress or 0),
+                stamina = stamina,
+                staminaLow = staminaLow,
+
+                street = GetStreetNameFromHashKey(streetHash),
+                dir = DIRS[math.floor((bearing + 22.5) / 45) % 8 + 1],
+                deg = math.floor(bearing),
+
+                talking = NetworkIsPlayerTalking(id),
+                proximity = prox,
+                radio = radio,
+
+                info = {
+                    id = GetPlayerServerId(id),
+                    job = p.job,
+                    cash = p.cash,
+                    bank = p.bank,
+                },
+                server = serverInfo,
+                vehicle = veh ~= 0 and getVehicleData(veh) or nil,
+            }
+
+            local encoded = json.encode(data)
+            if encoded ~= lastPayload then
+                lastPayload = encoded
+                SendNUIMessage({ action = 'update', data = data })
+            end
+        else
+            setShown(false)
+            DisplayRadar(false)
+            wait = 500
+        end
+
+        Wait(wait)
+    end
+end)
+
+RegisterNetEvent('minihud:serverInfo', function(count, max, ping)
+    serverInfo = { count = count, max = max, ping = ping }
+end)
+
+-- NUI -> Lua
+RegisterNUICallback('ready', function(data, cb)
+    alwaysMap = data.alwaysMap ~= false
+    Minimap.set(data.mapScale, data.mapX, data.mapY)
+    local info = Minimap.info
+    SendNUIMessage({
+        action = 'config',
+        logo = Config.Logo,
+        -- kotak penanda minimap di mode edit (false = minimap kustom dimatikan)
+        map = info and {
+            x = info.x, y = info.y, w = info.w, h = info.h, size = info.size,
+            margin = (1.0 - GetSafeZoneSize()) / 2.0, -- minimap menempel di safezone
+        } or false,
+    })
+    cb({})
+end)
+
+RegisterNUICallback('settings', function(data, cb)
+    alwaysMap = data.alwaysMap ~= false
+    Minimap.set(data.mapScale, data.mapX, data.mapY)
+    cb('ok')
+end)
+
+RegisterNUICallback('close', function(_, cb)
+    SetNuiFocus(false, false)
+    cb('ok')
+end)
+
+RegisterCommand(Config.Command, function()
+    userHidden = not userHidden
+end, false)
+
+RegisterCommand(Config.SettingsCommand, function()
+    SetNuiFocus(true, true)
+    SendNUIMessage({ action = 'settings', value = true })
+end, false)
+
+if Config.SettingsKey ~= '' then
+    RegisterKeyMapping(Config.SettingsCommand, 'Buka pengaturan HUD', 'keyboard', Config.SettingsKey)
+end
+
+-- Seatbelt bawaan HUD (hanya kalau Config.Seatbelt.builtin = true)
+if Config.Seatbelt and Config.Seatbelt.builtin then
+    RegisterCommand('minihud_belt', function()
+        local ped = PlayerPedId()
+        if not IsPedInAnyVehicle(ped, false) then return end
+        beltOn = not beltOn
+        SetPedConfigFlag(ped, 32, not beltOn) -- sabuk terpasang: tidak terlempar lewat kaca depan
+        LocalPlayer.state:set(Config.Seatbelt.statebag or 'seatbelt', beltOn, true)
+    end, false)
+    RegisterKeyMapping('minihud_belt', 'Pasang/lepas sabuk pengaman', 'keyboard', Config.Seatbelt.key or 'B')
+
+    CreateThread(function()
+        while true do
+            local wait = 500
+            local ped = PlayerPedId()
+            if beltOn and IsPedInAnyVehicle(ped, false) then
+                wait = 0
+                DisableControlAction(0, 75, true) -- tidak bisa keluar mobil saat sabuk terpasang
+            elseif not beltOn then
+                SetPedConfigFlag(ped, 32, true)
+            end
+            Wait(wait)
+        end
+    end)
+end
+
+-- ---------- stres (menembak & ngebut naik, santai turun) ----------
+CreateThread(function()
+    local cfg = Config.Stress
+    if not cfg or not cfg.enabled then return end
+
+    local lastShot, lastSpeed, lastRelief = 0, 0, 0
+    local lastTrigger = GetGameTimer()
+
+    while true do
+        local wait = 500
+        if Bridge.isLoggedIn() then
+            local ped = PlayerPedId()
+            local now = GetGameTimer()
+
+            -- menembak: IsPedShooting hanya true sesaat, jadi cek tiap frame selama pegang senjata api
+            if IsPedArmed(ped, 4) then
+                wait = 0
+                local sh = cfg.shooting
+                if sh and IsPedShooting(ped) and now - lastShot >= (sh.cooldown or 1000) then
+                    lastShot = now
+                    lastTrigger = now
+                    if math.random(100) <= (sh.chance or 100) then
+                        Bridge.addStress(math.random(sh.min or 1, sh.max or 3))
+                    end
+                end
+            end
+
+            -- ngebut: hanya pengemudi
+            local veh = GetVehiclePedIsIn(ped, false)
+            local sp = cfg.speeding
+            if sp and veh ~= 0 and GetPedInVehicleSeat(veh, -1) == ped then
+                if GetEntitySpeed(veh) * 3.6 >= (sp.speed or 110) and now - lastSpeed >= (sp.interval or 5000) then
+                    lastSpeed = now
+                    lastTrigger = now
+                    Bridge.addStress(math.random(sp.min or 1, sp.max or 2))
+                end
+            end
+
+            -- relief pelan kalau sudah lama tidak ada pemicu
+            local rl = cfg.relief
+            if rl and rl.enabled and now - lastTrigger >= (rl.idle or 20000) and now - lastRelief >= (rl.interval or 15000) then
+                lastRelief = now
+                Bridge.addStress(-(rl.amount or 1))
+            end
+        end
+        Wait(wait)
+    end
+end)
