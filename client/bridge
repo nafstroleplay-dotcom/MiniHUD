@@ -1,0 +1,70 @@
+-- Lapisan framework: satu-satunya tempat yang tahu soal QBox / qb-core / standalone.
+Bridge = { loaded = false }
+
+local function detect()
+    if Config.Framework ~= 'auto' then return Config.Framework end
+    if GetResourceState('qbx_core') ~= 'missing' then return 'qbox' end
+    if GetResourceState('qb-core') ~= 'missing' then return 'qb' end
+    return 'standalone'
+end
+
+Bridge.name = detect()
+
+local QBCore
+-- Data manual untuk mode standalone (diisi lewat export di bawah)
+local manual = { hunger = 100, thirst = 100, stress = 0 }
+
+local function rawPlayerData()
+    if Bridge.name == 'qbox' then
+        return exports.qbx_core:GetPlayerData() or {}
+    end
+    QBCore = QBCore or exports['qb-core']:GetCoreObject()
+    return QBCore.Functions.GetPlayerData() or {}
+end
+
+function Bridge.isLoggedIn()
+    if Bridge.name == 'standalone' then
+        return NetworkIsPlayerActive(PlayerId())
+    end
+    return Bridge.loaded or LocalPlayer.state.isLoggedIn == true
+end
+
+-- Selalu mengembalikan tabel dengan bentuk yang sama:
+-- { hunger, thirst, stress, job, cash, bank }  (job/cash/bank boleh nil)
+function Bridge.get()
+    if Bridge.name == 'standalone' then return manual end
+
+    local pd = rawPlayerData()
+    local meta, job, money = pd.metadata or {}, pd.job or {}, pd.money or {}
+    return {
+        hunger = meta.hunger,
+        thirst = meta.thirst,
+        stress = meta.stress,
+        job = job.label and ('%s - %s'):format(job.label, job.grade and job.grade.name or '-') or nil,
+        cash = money.cash,
+        bank = money.bank,
+    }
+end
+
+RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function() Bridge.loaded = true end)
+RegisterNetEvent('QBCore:Client:OnPlayerUnload', function() Bridge.loaded = false end)
+
+-- Untuk standalone: script lain (atau kamu) bisa mengisi data lewat export
+--   exports.minihud:SetStatus('hunger', 80)   -- hunger | thirst | stress (0-100)
+--   exports.minihud:SetInfo({ job = 'Polisi - Sersan', cash = 500, bank = 12000 })
+exports('SetStatus', function(key, value) manual[key] = value end)
+exports('SetInfo', function(data)
+    for k, v in pairs(data) do manual[k] = v end
+end)
+
+-- Ubah stres: framework -> server yang menyimpan; standalone -> disimpan lokal
+function Bridge.addStress(delta)
+    if delta == 0 then return end
+    if Bridge.name == 'standalone' then
+        manual.stress = math.max(0, math.min(100, (manual.stress or 0) + delta))
+    elseif delta > 0 then
+        TriggerServerEvent('minihud:server:gainStress', delta)
+    else
+        TriggerServerEvent('minihud:server:relieveStress', -delta)
+    end
+end
